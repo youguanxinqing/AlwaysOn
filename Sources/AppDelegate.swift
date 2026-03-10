@@ -6,10 +6,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let powerManager = PowerManager()
     private let batteryMonitor = BatteryMonitor()
     private let loginItemManager = LoginItemManager()
+    private let autoDisableManager = AutoDisableManager()
     private var isDesktop = false
 
     // Menu items that need updating
     private var toggleMenuItem: NSMenuItem!
+    private var autoDisableMenuItem: NSMenuItem!
+    private var cancelTimerSeparator: NSMenuItem!
+    private var cancelTimerMenuItem: NSMenuItem!
     private var batteryMenuItem: NSMenuItem!
     private var powerSourceMenuItem: NSMenuItem!
     private var batterySeparator: NSMenuItem!
@@ -38,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupStatusItem()
         setupBatteryMonitor()
+        setupAutoDisable()
         updateMenuState()
     }
 
@@ -55,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleMenuItem = NSMenuItem(title: "Enable AlwaysOn", action: #selector(toggleAlwaysOn), keyEquivalent: "")
         toggleMenuItem.target = self
         menu.addItem(toggleMenuItem)
+
+        autoDisableMenuItem = NSMenuItem(title: "Auto-disable: Off", action: nil, keyEquivalent: "")
+        autoDisableMenuItem.submenu = buildAutoDisableSubmenu()
+        menu.addItem(autoDisableMenuItem)
 
         batterySeparator = NSMenuItem.separator()
         menu.addItem(batterySeparator)
@@ -87,6 +96,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    // MARK: - Auto-disable
+
+    private func setupAutoDisable() {
+        autoDisableManager.onAutoDisable = { [weak self] in
+            DispatchQueue.main.async {
+                self?.powerManager.disable()
+                self?.updateMenuState()
+            }
+        }
+        autoDisableManager.onTimerChanged = { [weak self] in
+            DispatchQueue.main.async {
+                self?.updateAutoDisableMenuItem()
+            }
+        }
+    }
+
+    private func buildAutoDisableSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+
+        let options = [(30, "In 30 minutes"), (60, "In 1 hour"), (120, "In 2 hours"), (240, "In 4 hours")]
+        for (minutes, title) in options {
+            let item = NSMenuItem(title: title, action: #selector(scheduleAutoDisable(_:)), keyEquivalent: "")
+            item.tag = minutes
+            item.target = self
+            submenu.addItem(item)
+        }
+
+        let customItem = NSMenuItem(title: "Custom...", action: #selector(promptCustomTime), keyEquivalent: "")
+        customItem.target = self
+        submenu.addItem(customItem)
+
+        cancelTimerSeparator = NSMenuItem.separator()
+        cancelTimerSeparator.isHidden = true
+        submenu.addItem(cancelTimerSeparator)
+
+        cancelTimerMenuItem = NSMenuItem(title: "Cancel Timer", action: #selector(cancelAutoDisable), keyEquivalent: "")
+        cancelTimerMenuItem.target = self
+        cancelTimerMenuItem.isHidden = true
+        submenu.addItem(cancelTimerMenuItem)
+
+        return submenu
+    }
+
+    private func updateAutoDisableMenuItem() {
+        autoDisableMenuItem.title = "Auto-disable: \(autoDisableManager.remainingText)"
+        let active = autoDisableManager.isActive
+        cancelTimerSeparator.isHidden = !active
+        cancelTimerMenuItem.isHidden = !active
+    }
+
+    @objc private func scheduleAutoDisable(_ sender: NSMenuItem) {
+        autoDisableManager.schedule(minutes: sender.tag)
+    }
+
+    @objc private func promptCustomTime() {
+        let alert = NSAlert()
+        alert.messageText = "Auto-disable After"
+        alert.informativeText = "Enter the number of minutes:"
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        textField.placeholderString = "e.g. 90"
+        alert.accessoryView = textField
+        alert.window.initialFirstResponder = textField
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            guard let minutes = Int(textField.stringValue.trimmingCharacters(in: .whitespaces)),
+                  minutes > 0 else { return }
+            autoDisableManager.schedule(minutes: minutes)
+        }
+    }
+
+    @objc private func cancelAutoDisable() {
+        autoDisableManager.cancel()
     }
 
     // MARK: - Battery Monitor
@@ -123,6 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard powerManager.isEnabled else { return }
 
         if clamshellClosed {
+            autoDisableManager.cancel(notify: false)
             powerManager.disable()
             powerManager.sleepNow()
             updateMenuState()
@@ -182,11 +270,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAlwaysOn() {
         if powerManager.isEnabled {
+            autoDisableManager.cancel(notify: false)
             powerManager.disable()
         } else {
             powerManager.enable()
         }
         updateMenuState()
+        updateAutoDisableMenuItem()
     }
 
     @objc private func toggleLoginItem() {
@@ -196,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quitApp() {
+        autoDisableManager.cancel(notify: false)
         if powerManager.isEnabled {
             powerManager.disable()
         }
@@ -204,6 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        autoDisableManager.cancel(notify: false)
         if powerManager.isEnabled {
             powerManager.disable()
         }
